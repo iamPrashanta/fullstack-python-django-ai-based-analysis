@@ -1,0 +1,106 @@
+version: '3.9'
+
+services:
+
+  # ── Primary PostgreSQL (main app DB) ────────────────────────────────────────
+  db:
+    image: ankane/pgvector          # pgvector-enabled postgres image
+    container_name: postgres_db
+    environment:
+      POSTGRES_DB:       testdb
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: SecurePass1234
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d testdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Vector PostgreSQL (pgvector — AI embeddings & ML results) ───────────────
+  vector_db:
+    image: ankane/pgvector
+    container_name: postgres_vector_db
+    environment:
+      POSTGRES_DB:       vector_db
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: SecurePass1234
+    ports:
+      - "5433:5432"                  # exposed on 5433 to avoid conflict with db
+    volumes:
+      - vector_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vector_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (Celery broker + cache) ────────────────────────────────────────────
+  redis:
+    image: redis:alpine
+    container_name: python_django_redis
+    ports:
+      - "6381:6381"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Django Web Server ────────────────────────────────────────────────────────
+  web:
+    build: .
+    container_name: python_django_web
+    command: >
+      bash -c "python manage.py migrate &&
+               python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db
+      - VECTOR_DB_HOST=vector_db
+      - REDIS_HOST=redis
+      - CELERY_BROKER_URL=redis://redis:6381/1
+      - CELERY_RESULT_BACKEND=redis://redis:6381/1
+    depends_on:
+      db:
+        condition: service_healthy
+      vector_db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Celery Worker ────────────────────────────────────────────────────────────
+  celery:
+    build: .
+    container_name: python_django_celery
+    command: celery -A config worker -l INFO
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=db
+      - VECTOR_DB_HOST=vector_db
+      - REDIS_HOST=redis
+      - CELERY_BROKER_URL=redis://redis:6381/1
+      - CELERY_RESULT_BACKEND=redis://redis:6381/1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  vector_db_data:
+  redis_data:
